@@ -243,7 +243,7 @@ def index():
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Brute Force Simulator</title>
+  <title>Brute Forcer</title>
   <style>
     body {{ font-family: Arial, sans-serif; margin: 20px; }}
     button {{ padding: 10px 20px; font-size: 16px; margin-bottom: 20px; margin-right: 10px; }}
@@ -370,6 +370,6 @@ def status():
 
 if __name__ == "__main__":
     # Use a random port for security
-    port = random.randint(10000, 65535)
+    port = 5500
     print(f"Starting Flask app on port {port}")
     app.run(host='0.0.0.0', port=port, debug=False)
