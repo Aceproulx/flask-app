@@ -12,7 +12,7 @@ import time
 # Config
 # =======================
 target_base = "https://sms.mzuni.ac.mw"  # target URL
-proxychoice = "yes"                     # "yes" = use 127.0.0.1:8080, "no" = direct
+proxychoice = "no"                     # "yes" = use 127.0.0.1:8080, "no" = direct
 proxy_url = "http://127.0.0.1:8080"
 emails_file = "emails.txt"
 passwords_file = "passwords.txt"

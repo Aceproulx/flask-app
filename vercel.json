@@ -1,0 +1,9 @@
+{
+  "version": 2,
+  "builds": [
+    { "src": "flash_app.py", "use": "@vercel/python" }
+  ],
+  "routes": [
+    { "src": "/(.*)", "dest": "flash_app.py" }
+  ]
+}
